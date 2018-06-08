@@ -7,17 +7,14 @@ local tfx = require "termfx"
 local config
 local function resetconfig()
 	config = {
-		fg = tfx.color.WHITE,
-		bg = tfx.color.BLUE,
+		widget_fg = tfx.color.WHITE,
+		widget_bg = tfx.color.BLUE,
 
 		sel_fg = tfx.color.BLACK,
 		sel_bg = tfx.color.CYAN,
 
-		ui_fg = tfx.color.CYAN,
-		ui_bg = tfx.color.BLUE,
-
-		elem_bg = tfx.color.WHITE,
 		elem_fg = tfx.color.BLUE,
+		elem_bg = tfx.color.WHITE,
 		
 		sep = '|'
 	}
@@ -192,6 +189,7 @@ local function waitkeypress()
 	repeat
 		evt = tfx.pollevent()
 	until evt and evt.type == 'key'
+	return evt.char or evt.key
 end
 
 -- helper
@@ -318,7 +316,7 @@ local function text(tbl, title)
 		if lw > w then w = lw end
 	end
 	
-	tfx.attributes(config.fg, config.bg)
+	tfx.attributes(config.widget_fg, config.widget_bg)
 	x, y, w, h = frame(w, th, title)
 	if th > h then
 		x, y, w, h = frame(w+1, th, title)
@@ -326,7 +324,7 @@ local function text(tbl, title)
 	
 	repeat
 		x, y, w, h = frame(w, h, title)
-		tfx.attributes(config.fg, config.bg)
+		tfx.attributes(config.widget_fg, config.widget_bg)
 		first = drawtext(tbl, first, x, y, w, h)
 		tfx.present()
 		
@@ -353,7 +351,7 @@ local function ask(msg, btns, title)
 	local sel = 1
 	btns = btns or { "Yes", "No" }
 
-	tfx.attributes(config.fg, config.bg)
+	tfx.attributes(config.widget_fg, config.widget_bg)
 
 	local bw = #btns[1]
 	for i = 2, #btns do
@@ -716,7 +714,7 @@ local function lex_comment(str, pos)
 	if not s then return nil end
 	t, s, e = lex_longstr(str, pos+2)
 	if not s then
-		s, e = find(str, "^--[^\n]+\n", pos)
+		s, e = find(str, "^--[^\n]*\n", pos)
 		e = e - 1
 	elseif not t then
 		return nil, "unfinished comment"
@@ -751,7 +749,14 @@ local function lualexer(str, skipws)
 		local pos = 1
 		local line, col = 1, 1
 		local ch, t, s, e, l, c
-		
+
+		-- skip initial #! if present
+		s, e = string.find(str, "^#![^\n]*\n")
+		if s then
+			line = 2
+			pos = e + 1
+		end
+
 		while pos <= #str do
 			ch = string.sub(str, pos, pos)
 			if ch == '-' then
@@ -839,8 +844,24 @@ local function expand_tabs(txt, tw)
 	return table.concat(tbl)
 end
 
+-- this should somehow also catch lines with only a [local] function(...)
+local function breakable(t, src, s, e)
+	if t == 'key' then
+		local what = string.sub(src, s, e)
+		if what == 'end' then
+			return false
+		end
+	elseif t == 'other' then
+		local what = string.sub(src, s, e)
+		if what == ')' or what == '}' or what == ']' then
+			return false
+		end
+	end
+	return true
+end
+
 -- very simple for the time being: we consider every line that has a
--- token other than com or spc breakable.
+-- token other than com or spc or the keyword 'end' breakable.
 local function lualoader(file)
 	local srct = {}
 	local canbrk = {}
@@ -855,7 +876,7 @@ local function lualoader(file)
 		
 		local tokens = lualexer(src)
 		for t, s, e, l, c in tokens do
-			if t ~= 'com' and t ~= 'spc' then
+			if t ~= 'com' and t ~= 'spc' and breakable(t, src, s, e) then
 				canbrk[l] = true
 			end
 		end
@@ -887,6 +908,41 @@ do
 	Released under MIT/X11 license. See file LICENSE for details.
 --]]
 
+---------- configure your colors here ----------------------------------
+
+local default_fg = "WHITE"
+local default_bg = "BLACK"
+
+local configuration = {
+	-- default
+	fg = "WHITE",
+	bg = "BLACK",
+
+	-- variable display
+	var_fg = "WHITE",
+	var_bg = "BLUE",
+
+	-- misc foregrounds: breakpoint mark, current line mark, and message
+	-- after client terminated
+	mark_bpt_fg = "RED",
+	mark_cur_fg = "CYAN",
+	done_fg = "RED",
+	
+	-- windows (help, dialogs)
+	widget_fg = "WHITE",
+	widget_bg = "BLUE",
+
+	-- selection
+	sel_fg = "BLACK",
+	sel_bg = "CYAN",
+
+	-- ui elements (buttons etc). selected elements will use sel_*
+	elem_fg = "BLUE",
+	elem_bg = "WHITE",
+}
+
+---------- end configure section ---------------------------------------
+
 -- these are necessary because the mobdebug module recklessly calls
 -- print and os.exit(!)
 local _G_print = _G.print
@@ -907,6 +963,8 @@ local current_file = ""
 local current_line = 0
 local selected_line
 local select_cmd
+local last_search
+local last_match = 0
 local cmd_output = {}
 local cmd_outlog
 local pinned_evals = {}
@@ -920,6 +978,22 @@ local unpack = unpack or table.unpack
 
 local loader = require "loader"
 local ui = require "ui"
+
+---------- initialization ----------------------------------------------
+
+local function init()
+	sources = {}
+	current_src = {}
+	current_file = ""
+	current_line = 0
+	selected_line = nil
+	select_cmd = nil
+	last_search = nil
+	last_match = 0
+	cmd_output = {}
+	pinned_evals = {}
+	display_pinned = true
+end
 
 ---------- misc helpers ------------------------------------------------
 
@@ -1020,6 +1094,25 @@ local function set_current_file(file)
 	current_src = src
 end
 
+---------- configuration -----------------------------------------------
+
+local config = setmetatable({}, {
+	__index = function(_, col)
+		if string.find(col, "fg$") then
+			return ui.color[default_fg]
+		else
+			return ui.color[default_bg]
+		end
+	end
+})
+
+local function configure()
+	for k, v in pairs(configuration) do
+		config[k] = ui.color[v]
+		pcall(ui.configure, { k = v })
+	end
+end
+
 ---------- render display ----------------------------------------------
 
 -- source display
@@ -1034,17 +1127,17 @@ local function displaysource_renderrow(r, s, x, y, w, extra)
 	ui.drawfield(x, y, rs, linew)
 
 	if isbrk[r] then
-		ui.setcell(x + linew, y, '*', ui.color.RED, ui.color.BLACK)
+		ui.setcell(x + linew, y, '*', config.mark_bpt_fg, config.bg)
 	end
 	if extra.cur == r then
-		ui.setcell(x + linew + 1, y, '-', ui.color.CYAN, ui.color.BLACK)
-		ui.setcell(x + linew + 2, y, '>', ui.color.CYAN, ui.color.BLACK)
+		ui.setcell(x + linew + 1, y, '-', config.mark_cur_fg, config.bg)
+		ui.setcell(x + linew + 2, y, '>', config.mark_cur_fg, config.bg)
 	end
 
 	local fg, bg = ui.attributes()
 	
 	if extra.sel == r then
-		ui.attributes(ui.getconfig('sel_fg'), ui.getconfig('sel_bg'))
+		ui.attributes(config.sel_fg, config.sel_bg)
 	end
 
 	return ui.drawfield(x + linew + 3, y, tostring(s), w - linew - 3)
@@ -1168,11 +1261,12 @@ local function displaypinned(pinned, x, y, w, h)
 	while #pinned > h do
 		table.remove(pinned, 1)
 	end
-	local cmd = "do local t, _k, _e = {};"
+	-- this is not strictly hygienic. should find a better solution for it.
+	local cmd = "do local __________t, __________k, __________e = {};"
 	for i=1, #pinned do
-		cmd = cmd .. "_k, _e = pcall(function() t[" .. i .. "]="..pinned[i][1].." end);"
+		cmd = cmd .. "__________k, __________e = pcall(function() __________t[" .. i .. "]="..pinned[i][1].." end);"
 	end
-	cmd = cmd .. "return t;end"
+	cmd = cmd .. "return __________t;end"
 	local res, _, err = mdb.handle("exec "..cmd, client)
 	local rt = {}
 	if res then
@@ -1211,12 +1305,12 @@ local function display()
 		pinw = 0
 	end
 	
-	ui.clear(ui.color.WHITE, ui.color.BLACK)
+	ui.clear(config.fg, config.bg)
 	ui.drawstatus({"Skript: "..(basefile or ""), "Dir: "..(basedir or ""), "press h for help"}, 1, ' | ')
 
 	-- variables view
 	if pinw > 0 then
-		ui.attributes(ui.color.WHITE, ui.color.BLUE)
+		ui.attributes(config.var_fg, config.var_bg)
 		displaypinned(pinned_evals, srcw + 1, 2, pinw, srch-1)
 	end
 
@@ -1247,12 +1341,12 @@ local function display()
 		end
 	end
 		
-	ui.attributes(ui.color.WHITE, ui.color.BLACK)
+	ui.attributes(config.fg, config.bg)
 	displaysource(current_src, 1, 2, srcw, srch-1)
 	ui.drawstatus({"File: "..current_file, "Line: "..current_line.."/"..current_src.lines, #pinned_evals > 0 and "pinned: " .. #pinned_evals or ""}, srch + 1)
 	
 	-- commands view
-	ui.attributes(ui.color.WHITE, ui.color.BLACK)
+	ui.attributes(config.fg, config.bg)
 	displaycommands(cmd_output, 1, srch + 1, w, cmdh)
 	
 	-- input line
@@ -1285,7 +1379,9 @@ local function find_current_basedir()
 end
 
 local function startup()
-	ui.attributes(ui.getconfig('fg'), ui.getconfig('bg'))
+	init()
+
+	ui.attributes(config.widget_fg, config.widget_bg)
 
 	local msg = "Waiting for connections on port "..port
 	local x, y, w, h = ui.frame(#msg, 5, "debug.lua")
@@ -1314,7 +1410,7 @@ local function startup()
 		evt = ui.pollevent(0)
 		if evt and (evt.key == ui.key.ESC or evt.char == 'q' or evt.char == 'Q') then
 			server:close()
-			return nil
+			return false
 		end
 	until client ~= nil
 	server:close()
@@ -1328,7 +1424,6 @@ end
 local dbg_args = {}
 
 local function dbg_help()
-	local em = ui.color.WHITE + ui.format.BOLD
 	local t = {
 		"n             | step over next statement",
 		"s             | step into next statement",
@@ -1340,11 +1435,11 @@ local function dbg_help()
 		"= expr        | evaluate expression",
 		"! expr        | pin expression",
 		"d! [num]      | delete one or all pinned expressions",
-		"R             | restart debugging session",
 		"B dir         | set basedir",
 		"L dir         | set only local basedir",
 		"P             | toggle pinned expressions display",
 		"G [file] [num]| goto line in file or current file or to file",
+		"/ [str]       | search for str in current file, or continue last search",
 		"W[b|!] file   | write setup.",
 		"h             | help",
 		"q             | quit",
@@ -1414,12 +1509,6 @@ local function dbg_trace(num)
 end
 dbg_args[dbg_trace] = 'N'
 
-local function dbg_reload()
-	local res, line, err = mdb.handle("reload", client)
-	update_where()
-	return nil, err
-end
-
 local function dbg_eval(...)
 	local expr = table.concat({...}, ' ')
 	local res, line, err = mdb.handle("eval " .. expr, client)
@@ -1442,13 +1531,13 @@ local function dbg_delpin(_, pin)
 	if pin then
 		if pin >= 1 and pin <= #pinned_evals then
 			table.remove(pinned_evals, pin)
-			return "deleted pinned expession #" .. tostring(pin)
+			return "deleted pinned expression #" .. tostring(pin)
 		else
 			return nil, "invalid pin number"
 		end
 	else
 		pinned_evals = {}
-		return "deleted all pinned expessions"
+		return "deleted all pinned expressions"
 	end
 end
 
@@ -1558,6 +1647,32 @@ local function dbg_gotoline(file, line)
 end
 dbg_args[dbg_gotoline] = "SN"
 
+local function dbg_searchstr(str)
+	local src = current_src.src
+	local first = 1
+
+	if not str and last_search then
+		str = last_search
+		first = last_match + 1
+	elseif not str and not last_search then
+		return
+	end
+
+	if str then
+		last_search = str
+		for line=first, #src do
+			if string.find(src[line], str, 1, true) then
+				selected_line = line
+				last_match = line
+				return "searching for " .. str
+			end
+		end
+	end
+	last_match = 0
+	return "no match, next / wraps"
+end
+dbg_args[dbg_searchstr] = "S"
+
 local function dbg_toggle_pinned()
 	display_pinned = not display_pinned
 	return (display_pinned and "" or "don't ") .. "display pinned evals"
@@ -1612,7 +1727,6 @@ local dbg_imm = {
 	['n'] = dbg_over,
 	['r'] = dbg_run,
 	['o'] = dbg_out,
-	['R'] = dbg_reload,
 	['P'] = dbg_toggle_pinned,
 	['.'] = dbg_return,
 }
@@ -1626,12 +1740,17 @@ local dbg_cmdl = {
 	['B'] = dbg_basedir,
 	['L'] = dbg_local_basedir,
 	['G'] = dbg_gotoline,
+	['/'] = dbg_searchstr,
 	['W'] = dbg_writesetup,
 }
 
 local use_selection = {
 	['b'] = function() return "b " .. tostring(selected_line) end,
 	['d'] = function() if current_src.breakpts[selected_line] then return "db " .. tostring(selected_line) else return "d" end end,
+}
+
+local use_current = {
+	['d'] = function() if current_src.breakpts[current_line] then return "db " .. tostring(current_line) else return "d" end end,
 }
 
 -- argspec:
@@ -1734,7 +1853,6 @@ local function dbg_exec(cmdl)
 		end
 		s, e = string.find(cmdl, "^%s"..(quote and '*' or '+').."(%S)", e+1)
 	end
-
 	if dbg_imm[cmd] then
 		if #args == 0 then
 			return dbg_imm[cmd]()
@@ -1773,50 +1891,10 @@ local function dbg_execfile(file)
 	return "execution of commands in file '"..file.."' finished"
 end
 
----------- main --------------------------------------------------------
-
-local main = coroutine.create(function()
-
-	ui.outputmode(ui.color.COL256)
-	local w, h = ui.size()
-
-	local opts, err = get_opts("p:d:x:l:h?", arg)
-	if not opts or opts.h or opts['?'] then
-		local ret = err and err .. "\n" or ""
-		return ret .. "usage: "..arg[0] .. " [-p port] [-d dir] [-x file] [-l file]"
-	end
-	if opts.p then
-		port = tonumber(opts.p)
-		if not port then error("argument to -p needs to be a port number") end
-	end
-	if opts.d then
-		basedir = opts.d
-	end
-	if opts.l then
-		cmd_outlog = io.open(opts.l, "w")
-		if not cmd_outlog then
-			output_error("can't write output log '..opts.l..'")
-		end
-	end
-
-	ui.clear(ui.color.WHITE, ui.color.BLACK)
-	local ok, err = startup(port)
-	if not ok then error(err) end
-
+local function dbg_loop()
+	local w, h, evt, cmdl
 	local quit = false
-	local result, err
-	local first = 1
-	local cmdl
-
-	if opts.x then
-		local res, err = dbg_execfile(opts.x)
-		if res then
-			output(res)
-		else
-			output_error(err)
-		end
-	end
-
+	
 	update_where()
 
 	local evt
@@ -1833,6 +1911,8 @@ local main = coroutine.create(function()
 				local prefill = ch
 				if selected_line and use_selection[ch] then
 					prefill = use_selection[ch]()
+				elseif use_current[ch] then
+					prefill = use_current[ch]()
 				end
 				ui.setcell(1, h, ">")
 				cmdl = ui.input(2, h, w, prefill)
@@ -1870,25 +1950,95 @@ local main = coroutine.create(function()
 			end
 		end
 	until quit
+	
+	return quit
+end
+
+---------- main --------------------------------------------------------
+
+local ok, val = pcall(function()
+
+	ui.outputmode(ui.output.COL256)
+	configure()
+
+	local w, h = ui.size()
+	local quit = false
+
+	local opts, err = get_opts("p:d:x:l:h?", arg)
+	if not opts or opts.h or opts['?'] then
+		local ret = err and err .. "\n" or ""
+		return ret .. "usage: "..arg[0] .. " [-p port] [-d dir] [-x file] [-l file]"
+	end
+	if opts.p then
+		port = tonumber(opts.p)
+		if not port then error("argument to -p needs to be a port number") end
+	end
+	if opts.d then
+		basedir = opts.d
+	end
+	if opts.l then
+		cmd_outlog = io.open(opts.l, "w")
+		if not cmd_outlog then error("can't write output log '"..opts.l.."'") end
+	end
+
+	while not quit do
+		ui.clear(config.fg, config.bg)
+		local ok, err = startup(port)
+		if ok == nil then
+			error(err)
+		elseif ok == false then
+			return
+		end
+
+		local result, err
+		local first = 1
+		local cmdl
+
+		if opts.x then
+			local res, err = dbg_execfile(opts.x)
+			if res then
+				output(res)
+			else
+				output_error(err)
+			end
+		end
+
+		local loop = coroutine.create(dbg_loop)
+		local ok, val = coroutine.resume(loop)
+
+		if client then
+			client:close()
+			client = nil
+		end
+		
+		if ok and val == _os_exit then
+			local w, h = ui.size()
+			ui.attributes(config.done_fg + ui.format.BOLD, config.bg)
+			ui.drawfield(1, h, "Debugged program terminated, press q to quit or any key to restart.", w)
+			ui.hidecursor()
+			ui.present()
+			quit = ui.waitkeypress() == 'q'
+			output("Debugged program terminated" .. (quit and "" or ", restarting"))
+		elseif ok and val == true then
+			quit = true
+		else
+			output("Error: " .. val)
+			output(debug.traceback(loop))
+			return nil
+		end
+	end
+
+	return
 end)
 
-local ok, err = coroutine.resume(main)
-if err == _os_exit then
-	local w, h = ui.size()
-	ui.attributes(ui.color.RED + ui.format.BOLD, ui.color.BLACK)
-	ui.drawfield(1, h, "Debugged program terminated, press any key.", w)
-	ui.hidecursor()
-	ui.present()
-	ui.waitkeypress()
-end
 ui.shutdown()
+if outlog then outlog:close() end
 if client then client:close() end
 
-if not ok and err then
-	_G_print("Error: "..tostring(err))
-	_G_print(debug.traceback(main))
-elseif err then
-	_G_print(err)
+if not ok then
+	_G_print("Error: "..tostring(val))
+elseif val then
+	_G_print(val)
 else
 	_G_print("Bye.")
 end
