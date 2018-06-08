@@ -1,5 +1,8 @@
 #!/usr/bin/env lua
 
+do
+
+do
 local _ENV = _ENV
 package.preload[ "ui" ] = function( ... ) local arg = _G.arg;
 local tfx = require "termfx"
@@ -92,7 +95,7 @@ local function drawframe(x, y, w, h, title)
 
 	if title then
 		if w < pw then pw = w end
-		tfx.printat(x + (w - pw) / 2, y - 1, title, pw)
+		tfx.printat(math.floor(x + (w - pw) / 2), y - 1, title, pw)
 	end
 	
 	return x, y, w, h
@@ -548,7 +551,9 @@ return setmetatable({
 }, { __index = tfx })
 
 end
+end
 
+do
 local _ENV = _ENV
 package.preload[ "loader" ] = function( ... ) local arg = _G.arg;
 --[[
@@ -658,15 +663,22 @@ local function lex_longstr(str, pos)
 	return "str", pos, e
 end
 
-local function lex_shortstr(str, pos)
-	local s, e = find(str, '["\']', pos)
+function lex_shortstr(str, pos)
+	local s, e = find(str, '^["\']', pos)
 	if not s then return nil end
 	local ch = string.sub(str, s, e)
-	s, e = find(str, '^'..ch, pos+1)
-	if not s then s, e = find(str, '[^\\]'..ch, pos+1) end
+	local srch = '[\\\\'..ch..']'
+	repeat
+		s, e = find(str, srch, e+1)
+		if s then
+			ch = string.sub(str, s, e)
+			if ch == '\\' then e = e + 1 end
+		end
+	until not s or ch ~= '\\'
 	if not s then return nil, "unfinished string" end
 	return "str", pos, e
 end
+
 
 local function lex_name(str, pos)
 	local s, e = find(str, "^[%a_][%w_]*", pos)
@@ -686,7 +698,7 @@ end
 local function lex_number(str, pos)
 	local t = num
 	local p = pos
-	local s, e = find(str, "^0[xX]", p)
+	local s, e = find(str, "^%-?0[xX]", p)
 	if s then
 		p = e + 1
 		s, e = find(str, "^%x+", p)
@@ -695,15 +707,15 @@ local function lex_number(str, pos)
 		if e then p = e + 1 end
 		s, e = find(str, "^[pP][+-]?%d+", p)
 		if not e then e = p - 1 end
-		if e == pos+2 then return nil end
+		if e == pos+1 then return nil, "malformed number" end
 	else
-		s, e = find(str, "^%d+", p)
+		s, e = find(str, "^%-?%d+", p)
 		if e then p = e + 1 end
 		s, e = find(str, "^%.%d" .. (s and '*' or '+'), p)
 		if e then p = e + 1 end
 		s, e = find(str, "^[eE][+-]?%d+", p)
 		if not e then e = p - 1 end
-		if e < pos then return nil end
+		if e < pos then return nil, "malformed number" end
 	end
 	return "num", pos, e
 end
@@ -761,12 +773,15 @@ local function lualexer(str, skipws)
 			ch = string.sub(str, pos, pos)
 			if ch == '-' then
 				t, s, e = lex_comment(str, pos)
-				if not s then
+				if not t then
+					t, s, e = lex_number(str, pos)
+				end
+				if not t then
 					t, s, e = lex_op(str, pos)
 				end
 			elseif ch == "[" then
 				t, s, e = lex_longstr(str, pos)
-				if not s then
+				if not t then
 					t, s, e = lex_other(str, pos)
 				end
 			elseif ch == "'" or ch == '"' then
@@ -777,17 +792,15 @@ local function lualexer(str, skipws)
 				t, s, e = lex_number(str, pos)
 			elseif find(ch, "%p") then
 				t, s, e = lex_number(str, pos)
-				if not s then
+				if not t then
 					t, s, e = lex_op(str, pos)
 				end
-				if not s then
+				if not t then
 					t, s, e = lex_other(str, pos)
 				end
 			else
 				t, s, e = lex_space(str, pos)
 			end
-
-			if s ~= pos then error("internal error") end
 
 			l, c = line, col
 			if t then
@@ -807,7 +820,7 @@ local function lualexer(str, skipws)
 				coroutine.yield(t, pos, e, l, c)
 			elseif not t then
 				s = s or "invalid token"
-				coroutine.yield(nil, s .. " in line " .. l .. " char " .. c)
+				coroutine.yield('err', s .. " in line " .. l .. " char " .. c)
 				e = pos
 			end
 			pos = e + 1
@@ -846,7 +859,9 @@ end
 
 -- this should somehow also catch lines with only a [local] function(...)
 local function breakable(t, src, s, e)
-	if t == 'key' then
+	if t == "com" or t == "spc" then
+		return false
+	elseif t == 'key' then
 		local what = string.sub(src, s, e)
 		if what == 'end' then
 			return false
@@ -876,11 +891,16 @@ local function lualoader(file)
 		
 		local tokens = lualexer(src)
 		for t, s, e, l, c in tokens do
-			if t ~= 'com' and t ~= 'spc' and breakable(t, src, s, e) then
+			if t == "err" then
+				return nil, "Error: "..s
+			elseif breakable(t, src, s, e) then
 				canbrk[l] = true
 			end
 		end
 
+		if string.sub(src, #src, 1) ~= "\n" then
+			src = src .. "\n"
+		end
 		string.gsub(src, "([^\r\n]*)\r?\n", function(s) table.insert(srct, s) end)
 		for i = 1, #srct do
 			srct[i] = expand_tabs(srct[i])
@@ -890,15 +910,35 @@ local function lualoader(file)
 	return { src = srct, lines = #srct, canbrk = canbrk, breakpts = {}, selected = 0 }
 end
 
+--[[ DEBUG
+	local file = io.stdin
+	if arg[1] then
+		file = io.open(arg[1], "r")
+		if not file then print("could not open file " .. file) os.exit(1) end
+	end
+
+	local line
+	repeat
+		io.stdout:write("> ")
+		line = file:read()
+		local tokens = lualexer(line)
+		for t, s, e, l, c in tokens do
+			print(t, s, e, l, c)
+		end
+	until not line or line == "" 
+-- DEBUG ]]
+
 return {
 	lualoader = lualoader,
 	lualexer = lualexer
 }
 
+
+end
 end
 
-local _ENV = _ENV
-do
+end
+
 
 --[[
 	debug.lua
@@ -952,7 +992,7 @@ os.exit = function() coroutine.yield(_os_exit) end
 local mdb = require "mobdebug"
 local socket = require "socket"
 
-local port = 8172 -- default
+local port = tonumber((os.getenv("MOBDEBUG_PORT"))) or 8172 -- default
 
 local client
 local basedir, basefile
@@ -1170,6 +1210,9 @@ local function displaypinned_renderrow(r, s, x, y, w, extra)
 		ui.drawfield(x + 3, y, s[1], w1)
 		ui.setcell(x + 3 + w1, y, '=')
 		ui.drawfield(x + 3 + w1 + 1, y, s[2], w2)
+		if cmd_outlog then
+			cmd_outlog:write(r, ":\t", s[1], " = ", tostring(s[2]), "\n")
+		end
 	end
 end
 
@@ -1370,8 +1413,20 @@ local function unquote(s)
 end
 
 local function find_current_basedir()
-	local pwd = unquote(mdb.handle("eval os.getenv('PWD')", client))
-	local arg0 = unquote(mdb.handle("eval arg[0]", client))
+	local res, line, err = mdb.handle("eval os.getenv('PWD')", client)
+	if not res then
+		output_error(err)
+		return
+	end
+	local pwd = unquote(res)
+
+	res, line, err = mdb.handle("eval arg[0]", client)
+	if not res then
+		output_error(err)
+		return
+	end
+	local arg0 = unquote(res)
+
 	if pwd and arg0 then
 		basedir = basedir or pwd
 		basefile = string.match(arg0, "/([^/]+)$") or arg0
@@ -1431,6 +1486,7 @@ local function dbg_help()
 		"o             | continue until out of current function",
 		"t [num]       | trace execution",
 		"b [file] line | set breakpoint",
+		"c [f] ln cond | set conditional breakpoint",
 		"db [[file] ln]| delete one or all breakpoints",
 		"= expr        | evaluate expression",
 		"! expr        | pin expression",
@@ -1446,6 +1502,7 @@ local function dbg_help()
 		"[page] up/down| navigate source file",
 		"left/right    | select current line",
 		".             | reset view",
+		"D             | stop debugging and continue execution",
 	}
 	ui.text(t, "Commands")
 end
@@ -1471,6 +1528,32 @@ local function update_where()
 		selected_line = nil
 end
 
+local function check_break_cond()
+	if current_src.breakpts[current_line] then
+		if type((current_src.breakpts[current_line])) == "string" then
+			local res, line, err = mdb.handle("eval " .. current_src.breakpts[current_line], client)
+			if err ~= nil then
+				output_error("in breakpoint condition:", err)
+				res = true
+			else
+				local lres = string.lower(res)
+				if lres == "false" or lres == "nil" then
+					res = false
+				else
+					res = true
+				end
+				if res then
+					output("Cond:", current_src.breakpts[current_line], " is true")
+				end
+			end
+			return res
+		else
+			return true
+		end
+	end
+	return false
+end
+
 local function dbg_over()
 	local res, line, err = mdb.handle("over", client)
 	update_where()
@@ -1484,13 +1567,22 @@ local function dbg_step()
 end
 
 local function dbg_run()
-	local res, line, err = mdb.handle("run", client)
-	update_where()
+	local res, line, err
+	repeat
+		res, line, err = mdb.handle("run", client)
+		update_where()
+	until check_break_cond()
 	return nil, err
 end
 
 local function dbg_out()
 	local res, line, err = mdb.handle("out", client)
+	update_where()
+	return nil, err
+end
+
+local function dbg_done()
+	local res, line, err = mdb.handle("done", client)
 	update_where()
 	return nil, err
 end
@@ -1502,7 +1594,7 @@ local function dbg_trace(num)
 	while not num or steps <= num do
 		res, err = dbg_step()
 		display()
-		if current_src.breakpts[current_line] then return end
+		if check_break_cond() then return end
 		steps = steps + 1
 	end
 	return res, err
@@ -1568,6 +1660,35 @@ local function dbg_setb(file, line)
 	return res, err
 end
 dbg_args[dbg_setb] = "Sn"
+
+local function dbg_setbcond(file, line, ...)
+	local res, _, err
+	local cond = table.concat({...}, ' ')
+	if file then
+		res, err = get_file(file)
+		if not res then
+			return nil, err
+		end
+	else
+		file = current_file
+	end
+	if not get_file(file).canbrk[line] then
+		return nil, "can't set conditional breakpoint in file '"..file.."' line "..line
+	end
+	if file and line then
+		res, _, err = mdb.handle("setb " .. file .. " " .. line, client)
+		if not err then
+			res = "added conditional breakpoint at " .. res .. " line " .. line
+			get_file(file).breakpts[tonumber(line)] = cond
+		else
+			res = nil
+		end
+	else
+		err = "command requires file (optional) and line number as arguments"
+	end
+	return res, err
+end
+dbg_args[dbg_setbcond] = "Sn*"
 
 local function dbg_delb(file, line)
 	local res, _, err
@@ -1688,8 +1809,12 @@ local function dbg_writesetup(what, file)
 	end
 	if breaks then
 		for n, s in pairs(sources) do
-			for i, _ in pairs(s.breakpts) do
-				res[#res+1] = string.format('b %q %d', n, i)
+			for i, c in pairs(s.breakpts) do
+				if c == true then
+					res[#res+1] = string.format('b %q %d', n, i)
+				else
+					res[#res+1] = string.format('c %q %d %s', n, i, c)
+				end
 			end
 		end
 	end
@@ -1728,12 +1853,14 @@ local dbg_imm = {
 	['r'] = dbg_run,
 	['o'] = dbg_out,
 	['P'] = dbg_toggle_pinned,
+	['D'] = dbg_done,
 	['.'] = dbg_return,
 }
 
 local dbg_cmdl = {
 	['t'] = dbg_trace,
 	['b'] = dbg_setb,
+	['c'] = dbg_setbcond,
 	['d'] = dbg_del,
 	['='] = dbg_eval,
 	['!'] = dbg_pin_eval,
@@ -1746,6 +1873,7 @@ local dbg_cmdl = {
 
 local use_selection = {
 	['b'] = function() return "b " .. tostring(selected_line) end,
+	['c'] = function() return "c " .. tostring(selected_line) .. " " end,
 	['d'] = function() if current_src.breakpts[selected_line] then return "db " .. tostring(selected_line) else return "d" end end,
 }
 
@@ -1956,80 +2084,87 @@ end
 
 ---------- main --------------------------------------------------------
 
-local ok, val = pcall(function()
+local ok, val
 
-	ui.outputmode(ui.output.COL256)
-	configure()
+if tonumber(mdb._VERSION) < 0.63 then
+	ok = nil
+	val = "debug.lua needs at least mobdebug version 0.63"
+else
+	ok, val = pcall(function()
 
-	local w, h = ui.size()
-	local quit = false
+		ui.outputmode(ui.output.COL256)
+		configure()
 
-	local opts, err = get_opts("p:d:x:l:h?", arg)
-	if not opts or opts.h or opts['?'] then
-		local ret = err and err .. "\n" or ""
-		return ret .. "usage: "..arg[0] .. " [-p port] [-d dir] [-x file] [-l file]"
-	end
-	if opts.p then
-		port = tonumber(opts.p)
-		if not port then error("argument to -p needs to be a port number") end
-	end
-	if opts.d then
-		basedir = opts.d
-	end
-	if opts.l then
-		cmd_outlog = io.open(opts.l, "w")
-		if not cmd_outlog then error("can't write output log '"..opts.l.."'") end
-	end
+		local w, h = ui.size()
+		local quit = false
 
-	while not quit do
-		ui.clear(config.fg, config.bg)
-		local ok, err = startup(port)
-		if ok == nil then
-			error(err)
-		elseif ok == false then
-			return
+		local opts, err = get_opts("p:d:x:l:h?", arg)
+		if not opts or opts.h or opts['?'] then
+			local ret = err and err .. "\n" or ""
+			return ret .. "usage: "..arg[0] .. " [-p port] [-d dir] [-x file] [-l file]"
+		end
+		if opts.p then
+			port = tonumber(opts.p)
+			if not port then error("argument to -p needs to be a port number") end
+		end
+		if opts.d then
+			basedir = opts.d
+		end
+		if opts.l then
+			cmd_outlog = io.open(opts.l, "w")
+			if not cmd_outlog then error("can't write output log '"..opts.l.."'") end
 		end
 
-		local result, err
-		local first = 1
-		local cmdl
+		while not quit do
+			ui.clear(config.fg, config.bg)
+			local ok, err = startup(port)
+			if ok == nil then
+				error(err)
+			elseif ok == false then
+				return
+			end
 
-		if opts.x then
-			local res, err = dbg_execfile(opts.x)
-			if res then
-				output(res)
+			local result, err
+			local first = 1
+			local cmdl
+
+			if opts.x then
+				local res, err = dbg_execfile(opts.x)
+				if res then
+					output(res)
+				else
+					output_error(err)
+				end
+			end
+
+			local loop = coroutine.create(dbg_loop)
+			local ok, val = coroutine.resume(loop)
+
+			if client then
+				client:close()
+				client = nil
+			end
+			
+			if ok and val == _os_exit then
+				local w, h = ui.size()
+				ui.attributes(config.done_fg + ui.format.BOLD, config.bg)
+				ui.drawfield(1, h, "Debugged program terminated, press q to quit or any key to restart.", w)
+				ui.hidecursor()
+				ui.present()
+				quit = ui.waitkeypress() == 'q'
+				output("Debugged program terminated" .. (quit and "" or ", restarting"))
+			elseif ok and val == true then
+				quit = true
 			else
-				output_error(err)
+				output_error(val)
+				output(debug.traceback(loop))
+				return nil
 			end
 		end
 
-		local loop = coroutine.create(dbg_loop)
-		local ok, val = coroutine.resume(loop)
-
-		if client then
-			client:close()
-			client = nil
-		end
-		
-		if ok and val == _os_exit then
-			local w, h = ui.size()
-			ui.attributes(config.done_fg + ui.format.BOLD, config.bg)
-			ui.drawfield(1, h, "Debugged program terminated, press q to quit or any key to restart.", w)
-			ui.hidecursor()
-			ui.present()
-			quit = ui.waitkeypress() == 'q'
-			output("Debugged program terminated" .. (quit and "" or ", restarting"))
-		elseif ok and val == true then
-			quit = true
-		else
-			output("Error: " .. val)
-			output(debug.traceback(loop))
-			return nil
-		end
-	end
-
-	return
-end)
+		return
+	end)
+end
 
 ui.shutdown()
 if outlog then outlog:close() end
@@ -2041,8 +2176,5 @@ elseif val then
 	_G_print(val)
 else
 	_G_print("Bye.")
-end
-
-
 end
 

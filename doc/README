@@ -2,7 +2,7 @@
 
 ## debug.lua ##
 
-Author: Gunnar Zötl , 2014.  
+Author: Gunnar Zötl , 2014-2017.  
 Released under MIT/X11 license. See file LICENSE for details.
 
 ## Introduction ##
@@ -30,6 +30,10 @@ dependencies:
 Alternatively, if you only downloaded the tarball, you can just copy
 debug.lua whereever you like (eg. /usr/local/bin), and as long as it can
 find it's dependencies, it will run.
+
+You will need version 0.63+ of mobdebug, which is available directly
+from mobdebugs github archive: <https://github.com/pkulchenko/MobDebug>
+or from the main luarocks repository.
 
 ## Using ##
 
@@ -67,7 +71,9 @@ and reopen it if there are, using the `P` command.
 :	get help on invocation
 
 `-p port`
-:	change port number
+:	change port number. If you don't use this, debug.lua will try to
+	read it from the environment variable `MOBDEBUG_PORT`, and if that
+	is unset, port defaults to 8172.
 
 `-d dir`
 :	set local basedir
@@ -137,7 +143,7 @@ Arguments are delimited by spaces, and can be numbers or strings. String
 arguments can be enclosed by quotes, if they need to contain spaces. In
 the rare event that you actually want to have a quoted string as an
 argument (probably to `=`), you can prefix the opening quote with a
-backtick (\`).
+backtick (\`), or use lua's long string notation.
 
 #### Debugging Commands ####
 
@@ -165,6 +171,10 @@ backtick (\`).
 	you need to enter the arguments. If file is omitted, uses the file
 	currently in the source display.
 
+`c [file] line cond`
+:	set conditional breakpoint. Like `b`, but he commands `r` and `t`
+	will stop here only if the condition evaluates to a true value. 
+
 `db [[file] line]`
 :	delete breakpoint. If you selected a line in the source file using
 	the cursor keys, and that line has a breakpoint, or the current line
@@ -185,6 +195,9 @@ backtick (\`).
 `d! [num]`
 :	delete pinned expression num, or if called without argument, delete
 	all pinned expressions.
+
+`D`
+:	stop debugging and continue execution of program until it ends.
 
 #### Source Navigation and other Commands ####
 
