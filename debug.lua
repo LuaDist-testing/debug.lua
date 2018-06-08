@@ -116,56 +116,14 @@ end
 -- helper
 -- format a string to fit a certain width. Returns a table with the lines
 local function format(msg, w)
-	if not w then return { msg } end
-	local _
-	local last = #msg
-	local pos, posn = 1, 0
-	local ss, se = string.find(msg, "%s+", pos)
-	local ps, pe, pc = string.find(msg, "%s*([%.,:;])", pos)
-	local words = {}
-	while ss or ps do
-		ps = ps or last + 1
-		ss = ss or last + 1
-		if ps <= ss then
-			words[#words+1] = string.sub(msg, pos, ps-1) .. pc
-			pos = pe + 1
-		else
-			words[#words+1] = string.sub(msg, pos, ss - 1)
-			pos = se + 1
-		end
-		_, posn = string.find(msg, "^%s+", pos)
-		if posn then
-			pos = posn+1
-		end
-		ss, se = string.find(msg, "%s+", pos)
-		ps, pe, pc = string.find(msg, "%s*([%.,:;!?])", pos)
-	end
-	if pos <= last then words[#words+1] = string.sub(msg, pos) end
+	if not w or w >= #msg then return { msg } end
+	local pos, last = 1, #msg
+	local res = {}
+	repeat
+		res[#res+1] = string.sub(msg, pos, pos + w - 1)
+		pos = pos + w
+	until pos > last
 
-	local res, ln = {}, nil
-	
-	for i=1, #words do
-		if ln then
-			if #ln + 1 + #words[i] > w then
-				res[#res+1] = ln
-				ln = words[i]
-				while #ln > w do
-					res[#res+1] =  string.sub(ln, 1, w)
-					ln = string.sub(ln, w+1)
-				end
-			else
-				ln = ln .. " " .. words[i]
-			end
-		else
-			ln = words[i]
-			while #ln > w do
-				res[#res+1] =  string.sub(ln, 1, w)
-				ln = string.sub(ln, w+1)
-			end
-		end
-	end
-	if ln then res[#res+1] = ln end
-	
 	return res
 end
 
@@ -948,6 +906,9 @@ end
 	Released under MIT/X11 license. See file LICENSE for details.
 --]]
 
+local config_file = "debug.lua.cfg"
+local user_config = os.getenv("HOME") .. "/.config/" .. config_file
+
 ---------- configure your colors here ----------------------------------
 
 local default_fg = "WHITE"
@@ -1036,6 +997,14 @@ local function init()
 end
 
 ---------- misc helpers ------------------------------------------------
+
+local function file_exists(name)
+	local file, err = io.open(name, "r")
+	if file then
+		file:close()
+	end
+	return file ~= nil
+end
 
 local function output(...)
 	local line = table.concat({...}, " ")
@@ -1146,11 +1115,71 @@ local config = setmetatable({}, {
 	end
 })
 
-local function configure()
+local function decode_color(c)
+	local col = ui.color[c or ""]
+	if col then
+		return col
+	end
+	local r, g, b = string.match(c, "^#([0-5])([0-5])([0-5])$")
+	if r and g and b then
+		col = ui.rgb2color(tonumber(r), tonumber(g), tonumber(b))
+		return col
+	end
+	return nil
+end
+
+local function loadconfig(name)
+	local res = {}
+	local fn, err = loadfile(name, "t", res)
+	print(fn, err)
+	local ok
+	if fn then
+		ok,  err = pcall(fn)
+		if ok then
+			for k, v in pairs(res) do
+				if not configuration[k] then
+					return nil, "Failed to load config file '" .. name .. "': " .. "invalid option '" .. k .. "'"
+				elseif not decode_color(v) then
+					return nil, "Failed to load config file '" .. name .. "': " .. "invalid value for option '" .. k .. "'"
+				end
+			end
+			return res
+		end
+	end
+	return nil, "Failed to load config file " .. err
+end
+
+local function readconfig()
+	local ucfg, lcfg, err
+	if file_exists(user_config) then
+		ucfg, err = loadconfig(user_config)
+		if err then return nil, err end
+	end
+	if file_exists(config_file) then
+		lcfg, err = loadconfig(config_file)
+		if err then return nil, err end
+	end
 	for k, v in pairs(configuration) do
-		config[k] = ui.color[v]
+		if ucfg and ucfg[k] then
+			configuration[k] = ucfg[k]
+		end
+		if lcfg and lcfg[k] then
+			configuration[k] = lcfg[k]
+		end
+	end
+	return true
+end
+
+local function configure()
+	local ok, err = readconfig()
+	if not ok then
+		return ok, err
+	end
+	for k, v in pairs(configuration) do
+		config[k], err = decode_color(v)
 		pcall(ui.configure, { k = v })
 	end
+	return true
 end
 
 ---------- render display ----------------------------------------------
@@ -2062,7 +2091,7 @@ local function dbg_loop()
 				output("->", resa[1])
 				if #resa > 1 then
 					for i = 2, #resa do
-						output("  ", resa[i])
+						output(" >", resa[i])
 					end
 				end
 			end
@@ -2093,7 +2122,10 @@ else
 	ok, val = pcall(function()
 
 		ui.outputmode(ui.output.COL256)
-		configure()
+		local ok, err = configure()
+		if not ok then
+			error(err)
+		end
 
 		local w, h = ui.size()
 		local quit = false
